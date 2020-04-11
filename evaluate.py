@@ -39,5 +39,5 @@ def main(args):
 if __name__ == '__main__':
 	print("Evaluating Model")
 	args = parser.parse_args()
-    pp.pprint(args)
-    main(args)
+	pp.pprint(args)
+	main(args)
