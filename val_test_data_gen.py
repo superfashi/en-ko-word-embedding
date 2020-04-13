@@ -5,14 +5,10 @@ TEST_SIZE = 500
 
 def pick_good_pair():
     kor, eng = word_pairs.pop()
-    if ', ' in eng:
-        eng = eng.split(', ')[0]
     return (eng, kor)
 
 def pick_bad_pair():
     eng = random.choice(eng_words)
-    if ', ' in eng:
-        eng = eng.split(', ')[0]
     kor = random.choice(kor_words)
     return (eng, kor) if dic[kor] != eng else pick_bad_pair()
 
@@ -26,11 +22,10 @@ def generate_eval(name):
 
 if __name__ == '__main__':
     dic = dict()
-    with open('dataset/kengdic_2011.tsv', encoding='utf_8') as f:
+    with open('dataset/dict.ko.tsv', encoding='utf_8') as f:
         for l in f:
-            s = l.split('\t')
-            if s[3] != "NULL":
-                dic[s[1]] = s[3]
+            s = l.strip().split('\t')
+            dic[s[0]] = s[1]
     word_pairs = list(dic.items())
     random.shuffle(word_pairs)
     kor_words, eng_words = list(dic.keys()), list(dic.values())
