@@ -43,4 +43,8 @@ if __name__ == '__main__':
         with open('val_pred.txt', 'wt', encoding='utf_8') as fw:
             for l in f:
                 eng, kor, _ = l.strip().split('\t')
-                print(assoc[eng][kor] > 0, file=fw)
+                if eng in assoc:
+                    s = list(map(itemgetter(0), sorted(assoc[eng].items(), key=itemgetter(1), reverse=True)))
+                    print(kor in s[:5], file=fw)
+                else:
+                    print(False, file=fw)

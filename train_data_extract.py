@@ -5,7 +5,7 @@ from translate.storage.tmx import tmxfile
 
 def is_english(char: str):
     o = ord(char)
-    return o == 32 or 48 <= o <= 57 or 65 <= o <= 90 or 97 <= o <= 122 or 192 <= o <= 255
+    return o == 32 or o == 45 or 48 <= o <= 57 or 65 <= o <= 90 or 97 <= o <= 122 or 192 <= o <= 255
 
 def is_korean(char: str):
     o = ord(char)
