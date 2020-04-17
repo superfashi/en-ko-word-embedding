@@ -2,9 +2,13 @@
 import torch
 import random
 import gzip
+import pickle
+import time, math
 
 class BiCVM():
-	def __init__(self, wordVecSize=1, num_sent=-1, m=1, neg_samples=1, lamb=1, num_iters=50, v=False):
+	def __init__(self, wordVecSize=1, num_sent=-1, 
+		   		 m=1, neg_samples=1, lamb=1, num_iters=50, v=False,
+		   		 en="", ko=""):
 		self.wordVecSize = wordVecSize
 		self.num_sent = num_sent
 		self.m = m
@@ -17,6 +21,13 @@ class BiCVM():
 		self.koSents = []
 		self.theta = []
 		self.v = v
+
+		if en:
+			with open(en, 'rb') as f:
+				self.en = pickle.load(f)
+		if ko:
+			with open(ko, 'rb') as f:
+				self.ko = pickle.load(f)
 
 	def debug_print(self, args):
 		if self.v:
@@ -112,28 +123,36 @@ class BiCVM():
 
 	# Define main training loop
 	def train(self):
-		optimizer = torch.optim.Adagrad(self.theta)
-		count = 0
+		def time_since(since):
+		    s = time.time() - since
+		    m = math.floor(s / 60)
+		    s -= m * 60
+		    return '%dm %ds' % (m, s)
 
-		for _ in range(self.num_iters):
+		optimizer = torch.optim.Adagrad(self.theta)
+
+		start = time.time()
+		for count in range(self.num_iters):
 			if (count + 1) % 10 == 0:
 				percent = (count / self.num_iters) * 100
 				print("**** " + str(percent) + "% complete ****")
 
-			sent_count = 0
-			optimizer.zero_grad()
 			loss = 0
 			for i in range(len(self.enSents)):
-				if (sent_count + 1) % 10 == 0:
-					percent = (sent_count / len(self.enSents)) * 100
+				optimizer.zero_grad()
+				if (i + 1) % 10 == 0:
+					percent = (i / len(self.enSents)) * 100
 					print(str(percent) + "% of the sentences processed")
-				loss += self.loss(i)
-				sent_count += 1
-			
-			loss.backward()
-			optimizer.step()
+				loss = self.loss(i)
+				loss.backward()
+				optimizer.step()
 
-			count += 1
+			current_time = time_since(start)
+			print('Iteration ' + str(count + 1) + '/' + str(self.num_iters) + ' complete. Time elapsed: ' + str(current_time))
+			with open('bicvm_en', 'wb') as f:
+				pickle.dump(self.en, f)
+			with open('bicvm_ko', 'wb') as f:
+				pickle.dump(self.ko, f)
 
 	# Generate predictions based on validation data
 	def gen_predictions(self, val, out):
@@ -168,7 +187,7 @@ class BiCVM():
 
 # Train and test the model
 def main():
-	model = BiCVM(wordVecSize=128, num_sent=10000, num_iters=1, v=0)
+	model = BiCVM(wordVecSize=4, num_sent=100, num_iters=1, v=0)
 
 	print("---Loading Training Data---")
 	model.load_data('train.txt.gz')
