@@ -1,33 +1,40 @@
 # Imports
-import torch
 import random
 import gzip
+import numpy as np
 import pickle
+from scipy.spatial.distance import cosine
 import time, math
 
 class BiCVM():
 	def __init__(self, wordVecSize=1, num_sent=-1, 
 		   		 m=1, neg_samples=1, lamb=1, num_iters=50, v=False,
-		   		 en="", ko=""):
+		   		 tensors="", idxLookup="", lr=0.1):
 		self.wordVecSize = wordVecSize
 		self.num_sent = num_sent
 		self.m = m
 		self.neg_samples = neg_samples
 		self.lamb = lamb
 		self.num_iters = num_iters
-		self.en = dict()
-		self.ko = dict()
+		self.idxLookup = dict()
 		self.enSents = []
 		self.koSents = []
 		self.theta = []
+		self.lr = lr
 		self.v = v
+		self.grad = dict()
+		self.G = dict()
+		self.preTense = False
+		self.preIdx = False
 
-		if en:
-			with open(en, 'rb') as f:
-				self.en = pickle.load(f)
-		if ko:
-			with open(ko, 'rb') as f:
-				self.ko = pickle.load(f)
+		if tensors:
+			self.preTense = True
+			with open(tensors, 'rb') as f:
+				self.theta = pickle.load(f)
+		if idxLookup:
+			self.preIdx = True
+			with open(idxLookup, 'rb') as f:
+				self.idxLookup = pickle.load(f)
 
 	def debug_print(self, args):
 		if self.v:
@@ -37,6 +44,8 @@ class BiCVM():
 	# of sentences to their initial values
 	def load_data(self, train_file):
 		count = 0
+		prevLen = len(self.idxLookup)
+		idx = len(self.idxLookup)
 		with gzip.open(train_file, 'rt', encoding='utf_8') as f:
 		  for line in f:
 		  	# break if we've read the required number of sentences
@@ -53,71 +62,97 @@ class BiCVM():
 		  	enWords = data[0].split()
 		  	koWords = data[1].split()
 
-		  	# store tensors 
-		  	for i in range(len(enWords)):
-		  		if enWords[i] not in self.en:
-		  			self.en[enWords[i]] = torch.rand(1, self.wordVecSize, requires_grad = True)
+		  	# store words
+		  	for word in enWords:
+		  		if word not in self.idxLookup:
+		  			self.idxLookup[word] = idx
+		  			idx += 1
+		  		
 
-		  	for i in range(len(koWords)):
-		  		if koWords[i] not in self.ko:
-		  			self.ko[koWords[i]] = torch.rand(1, self.wordVecSize, requires_grad = True)
+		  	for word in koWords:
+		  		if word not in self.idxLookup:
+		  			self.idxLookup[word] = idx
+		  			idx += 1
+
 
 		  	self.enSents.append(enWords)
 		  	self.koSents.append(koWords)
 
 		  	count += 1
 
-		self.theta = list(self.en.values()) + list(self.ko.values())
-
-	# calculates the regularization term and returns it
-	def regularization(self):
-		return (self.lamb / 2) * (torch.norm(torch.stack(self.theta))**2)
-
-	# energy is defined as || f(a) - g(b) ||^2
-	def energy(self, a, b):
-		return torch.norm(torch.sum(a,0) - torch.sum(b,0))**2
-
+		print(str(idx) + " words in corpus")
+		if not self.preTense:
+			self.theta = np.random.rand(idx, self.wordVecSize)
+		elif idx - prevLen > 0:
+			print(self.theta.shape)
+			newWrds = np.random.rand(idx - prevLen, self.wordVecSize)
+			self.theta = np.concatenate((self.theta, newWrds), axis=0)
+			print(newWrds.shape)
+			print(self.theta.shape)
 	# Define loss function, see paper (https://arxiv.org/abs/1312.6173) for details
 	def loss(self, j):
-		# J(theta) = sum over all pairs (sum over all negative samples (Ehl(a, b, n_i) + regularization))
-		# Ehl(a, b, n_i) = max(0, m + Ebi(a, b) -- Ebi(a, n))
-		# Ebi(a, b) = energy(a, b)
-		# f = g = vector sum of all words in sentence
 		obj = 0
 
-		# convert sentences to torch matrices
-		enTensor = torch.empty(len(self.enSents[j]), self.wordVecSize)
-		koTensor = torch.empty(len(self.koSents[j]), self.wordVecSize)
+		# create vector representation of each sentence
+		a = np.zeros((1, self.wordVecSize))
+		b = np.zeros((1, self.wordVecSize))
 
-		for i in range(len(self.enSents[j])):
-			enTensor[i] = self.en[self.enSents[j][i]]
-		for i in range(len(self.koSents[j])):
-			koTensor[i] = self.ko[self.koSents[j][i]]
+		# using the ADD method in the paper (naive but effective)
+		for word in self.enSents[j]:
+			a += self.theta[self.idxLookup[word]]
 
-		# compute energy of the positive sample
-		goodEnergy = self.energy(enTensor, koTensor)
+		for word in self.koSents[j]:
+			b += self.theta[self.idxLookup[word]]
 
-		# for all required negative pairs, compute energy
-		for i in range(self.neg_samples): 
-			neg_samp = random.randint(0, len(self.enSents) - 1)
-			while neg_samp == j:
-				neg_samp = random.randint(0, len(self.enSents) - 1)
+		# generate some negative samples
+		for _ in range(self.neg_samples):
+			nidx = random.randint(0, len(self.enSents) - 1)
+			while nidx == j:
+				nidx = random.randint(0, len(self.enSents) - 1)
 
-			# convert negative sentence to torch
-			# TODO: should we turn off gradients for the negative sample (if even possible)?
-			negTensor = torch.empty(len(self.enSents[neg_samp]), self.wordVecSize)
+			# create the negative sentence
+			n = np.zeros((1, self.wordVecSize))
+			for word in self.enSents[nidx]:
+				n += self.theta[self.idxLookup[word]]
 
-			for k in range(len(self.enSents[neg_samp])):
-				negTensor[k] = self.en[self.enSents[neg_samp][k]]
+			# calculate loss
+			innerHinge = self.m + np.linalg.norm(a - b) - np.linalg.norm(a - n)
+			obj += max(0, innerHinge)
 
-			# compute negative energy
-			negEnergy = self.energy(enTensor, negTensor)
+			# accumulate gradients
+			agrad = np.zeros((1, self.wordVecSize))
+			bgrad = np.zeros((1, self.wordVecSize))
+			ngrad = np.zeros((1, self.wordVecSize))
 
-			# update objective fctn
-			obj += max(0, self.m + goodEnergy - negEnergy)
+			# TODO: are these the right gradients?
+			if innerHinge > 0:
+				agrad += (2 * (a - b) - 2 * (a - n))
+				bgrad += (-2 * (a - b))
+				ngrad += (2 * (a - n))
 
-		# add regularization
-		obj += self.regularization()
+				# print(agrad)
+				# print(bgrad)
+				# print(ngrad)
+
+			# apply gradients to relavant words
+			if ngrad.any() > 0:
+				for word in self.enSents[nidx]:
+					if word in self.grad:
+						self.grad[word] += ngrad
+					else:
+						self.grad[word] = ngrad
+			if agrad.any() > 0:
+				for word in self.enSents[j]:
+					if word in self.grad:
+						self.grad[word] += agrad
+					else:
+						self.grad[word] = agrad
+			if bgrad.any() > 0:
+				for word in self.koSents[j]:
+					if word in self.grad:
+						self.grad[word] += bgrad
+					else:
+						self.grad[word] = bgrad
 
 		return obj
 
@@ -129,56 +164,88 @@ class BiCVM():
 		    s -= m * 60
 		    return '%dm %ds' % (m, s)
 
-		optimizer = torch.optim.Adagrad(self.theta)
+		start = time.time() # track the time
 
-		start = time.time()
+		# perform the specified number of iterations
 		for count in range(self.num_iters):
-			if (count + 1) % 10 == 0:
-				percent = (count / self.num_iters) * 100
-				print("**** " + str(percent) + "% complete ****")
-
+			# reset loss and gradients
 			loss = 0
+			self.grad.clear()
+
+			# pass through every sentence and accumulate gradients
 			for i in range(len(self.enSents)):
-				optimizer.zero_grad()
-				if (i + 1) % 10 == 0:
+				if (i + 1) % (self.num_sent / 10) == 0:
 					percent = (i / len(self.enSents)) * 100
 					print(str(percent) + "% of the sentences processed")
-				loss = self.loss(i)
-				loss.backward()
-				optimizer.step()
+				loss += self.loss(i)
 
+			# account for regularization
+			loss += (self.lamb / 2) * (np.linalg.norm(self.theta)**2)
+
+			# gradient descent
+			for word in self.grad:
+				# compute gradient
+				regGrad = 2 * self.theta[self.idxLookup[word]]
+				trueGrad = self.grad[word] + regGrad
+
+				# adagrad
+				if word in self.G:
+					self.G[word] += trueGrad**2
+				else:
+					self.G[word] = trueGrad**2
+
+				adaLR = self.lr / (self.G[word] + 1e-8)**0.5
+				update = adaLR * trueGrad
+
+				# update theta
+				self.theta[self.idxLookup[word]] -= update[0]
+
+			# print training info
 			current_time = time_since(start)
-			print('Iteration ' + str(count + 1) + '/' + str(self.num_iters) + ' complete. Time elapsed: ' + str(current_time))
-			with open('bicvm_en', 'wb') as f:
-				pickle.dump(self.en, f)
-			with open('bicvm_ko', 'wb') as f:
-				pickle.dump(self.ko, f)
+			print('Iteration ' + str(count + 1) + '/' 
+				  + str(self.num_iters) 
+				  + ' complete. Time elapsed: ' 
+				  + str(current_time) + '. Loss: ' 
+				  + str(loss / len(self.enSents)))
+
+			# checkpoint
+			with open('bicvm_theta', 'wb') as f:
+				pickle.dump(self.theta, f)
+			with open('bicvm_lookup', 'wb') as f:
+				pickle.dump(self.idxLookup, f)
 
 	# Generate predictions based on validation data
 	def gen_predictions(self, val, out):
-		cos = torch.nn.CosineSimilarity()
 		predictions = []
 
 		# make predictions
-		# TODO: perhaps a better method for prediction is needed
+		# TODO: change how out of vocab is handled and maybe how predictions are made
 		with open(val, "r") as f:
 			for line in f:
 				data = line[:-1].split("\t")
-				if data[1] in self.ko and data[0] in self.en:
-					similarity = cos(self.ko[data[1]], self.en[data[0]])
-					if similarity[0] >= 0.7:
-						predictions.append(True)
-					else:
-						predictions.append(False)
 
+				enVector = np.zeros((1, self.wordVecSize))
+				koVector = np.zeros((1, self.wordVecSize))
+
+				for word in data[0].split():
+					if word in self.idxLookup:
+						enVector += self.theta[self.idxLookup[word]]
+				for word in data[1].split():
+					if word in self.idxLookup:
+						koVector += self.theta[self.idxLookup[word]]
+
+				similarity = 1 - cosine(enVector, koVector) if enVector.all() != 0 and koVector.all() != 0 else 0
+
+				if similarity >= 0.5:
+					predictions.append(True)
+				else:
+					predictions.append(False)
+
+				if similarity != 0:
 					self.debug_print(data[1])
 					self.debug_print(data[0])
 					self.debug_print(similarity)
 					self.debug_print(' ')
-					# Doesn't work: predictions.append(similarity[0] >= 0.9)
-				else:
-					# for out of vocab words, just predict false for now
-					predictions.append(False)
 
 		# write predictions to output
 		with open(out, "w") as f:
@@ -187,13 +254,20 @@ class BiCVM():
 
 # Train and test the model
 def main():
-	model = BiCVM(wordVecSize=4, num_sent=100, num_iters=1, v=0)
+	# model = BiCVM(wordVecSize=40, num_sent=500000, num_iters=9,
+	# 			  neg_samples=5, m=5, lr=0.1)
+
+	model = BiCVM(wordVecSize=40, num_sent=-1, num_iters=15,
+				  neg_samples=5, m=5, tensors='bicvm_theta',
+				  idxLookup='bicvm_lookup')
 
 	print("---Loading Training Data---")
 	model.load_data('train.txt.gz')
+	print(model.theta[0])
 
 	print("---Training Model---")
 	model.train()
+	print(model.theta[0])
 
 	print("---Writing Predictions---")
 	model.gen_predictions("val.txt", "bicvm_pred.txt")
