@@ -3,13 +3,28 @@ import random
 import gzip
 import numpy as np
 import pickle
-from scipy.spatial.distance import cosine
+from sklearn.metrics.pairwise import cosine_similarity as cosine
 import time, math
+
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--vec', type=int, required=False)  # embedding dimension
+parser.add_argument('--sen', type=int, required=False)  # number of sentences to use 
+parser.add_argument('--neg', type=int, required=False)  # number of negative samples
+parser.add_argument('--mar', type=int, required=False)  # margin size
+parser.add_argument('--lam', type=int, required=False)  # lambda
+parser.add_argument('--itr', type=int, required=False)  # number of iterations
+parser.add_argument('--ver', type=bool, required=False) # verbose mode
+parser.add_argument('--ten', type=str, required=False)  # previous model weights
+parser.add_argument('--idx', type=str, required=False)  # previous model word2idx
+parser.add_argument('--lrt', type=float, required=False)# learning rate
+parser.add_argument('--bat', type=int, required=False)  # number of batches
 
 class BiCVM():
 	def __init__(self, wordVecSize=1, num_sent=-1, 
 		   		 m=1, neg_samples=1, lamb=1, num_iters=50, v=False,
-		   		 tensors="", idxLookup="", lr=0.1):
+		   		 tensors="", idxLookup="", lr=0.1, batch=10):
 		self.wordVecSize = wordVecSize
 		self.num_sent = num_sent
 		self.m = m
@@ -22,11 +37,13 @@ class BiCVM():
 		self.theta = []
 		self.lr = lr
 		self.v = v
-		self.grad = dict()
-		self.G = dict()
+		self.grad = None
+		self.G = np.zeros(2)
 		self.preTense = False
 		self.preIdx = False
+		self.batch = 10
 
+		# optionally load previous model
 		if tensors:
 			self.preTense = True
 			with open(tensors, 'rb') as f:
@@ -89,13 +106,14 @@ class BiCVM():
 			self.theta = np.concatenate((self.theta, newWrds), axis=0)
 			print(newWrds.shape)
 			print(self.theta.shape)
+
 	# Define loss function, see paper (https://arxiv.org/abs/1312.6173) for details
 	def loss(self, j):
 		obj = 0
 
 		# create vector representation of each sentence
-		a = np.zeros((1, self.wordVecSize))
-		b = np.zeros((1, self.wordVecSize))
+		a = np.zeros(self.wordVecSize)
+		b = np.zeros(self.wordVecSize)
 
 		# using the ADD method in the paper (naive but effective)
 		for word in self.enSents[j]:
@@ -106,29 +124,29 @@ class BiCVM():
 
 		# generate some negative samples
 		for _ in range(self.neg_samples):
-			nidx = random.randint(0, len(self.enSents) - 1)
+			nidx = random.randint(0, len(self.koSents) - 1)
 			while nidx == j:
-				nidx = random.randint(0, len(self.enSents) - 1)
+				nidx = random.randint(0, len(self.koSents) - 1)
 
 			# create the negative sentence
-			n = np.zeros((1, self.wordVecSize))
+			n = np.zeros(self.wordVecSize)
 			for word in self.enSents[nidx]:
 				n += self.theta[self.idxLookup[word]]
 
 			# calculate loss
-			innerHinge = self.m + np.linalg.norm(a - b) - np.linalg.norm(a - n)
+			innerHinge = self.m + 0.5 * np.linalg.norm(a - b) - 0.5 * np.linalg.norm(a - n)
 			obj += max(0, innerHinge)
 
 			# accumulate gradients
-			agrad = np.zeros((1, self.wordVecSize))
-			bgrad = np.zeros((1, self.wordVecSize))
-			ngrad = np.zeros((1, self.wordVecSize))
+			agrad = np.zeros(self.wordVecSize)
+			bgrad = np.zeros(self.wordVecSize)
+			ngrad = np.zeros(self.wordVecSize)
 
 			# TODO: are these the right gradients?
 			if innerHinge > 0:
-				agrad += (2 * (a - b) - 2 * (a - n))
-				bgrad += (-2 * (a - b))
-				ngrad += (2 * (a - n))
+				agrad += (n - b)
+				bgrad += (b - a)
+				ngrad += (a - n)
 
 				# print(agrad)
 				# print(bgrad)
@@ -136,25 +154,30 @@ class BiCVM():
 
 			# apply gradients to relavant words
 			if ngrad.any() > 0:
-				for word in self.enSents[nidx]:
-					if word in self.grad:
-						self.grad[word] += ngrad
-					else:
-						self.grad[word] = ngrad
+				for word in self.koSents[nidx]:
+					if word in self.idxLookup:
+						self.grad[self.idxLookup[word]] += ngrad
 			if agrad.any() > 0:
 				for word in self.enSents[j]:
-					if word in self.grad:
-						self.grad[word] += agrad
-					else:
-						self.grad[word] = agrad
+					if word in self.idxLookup:
+						self.grad[self.idxLookup[word]] += agrad
 			if bgrad.any() > 0:
 				for word in self.koSents[j]:
-					if word in self.grad:
-						self.grad[word] += bgrad
-					else:
-						self.grad[word] = bgrad
+					if word in self.idxLookup:
+						self.grad[self.idxLookup[word]] += bgrad
+
 
 		return obj
+
+	# update parameters
+	def update_param(self):
+		self.grad = self.grad + self.lamb * self.theta
+		if self.G.any() > 0:
+			self.G = self.G + self.grad * self.grad
+		else:
+			self.G = self.grad * self.grad
+
+		self.theta = self.theta - (self.lr / np.sqrt(self.G + 1e-8)) * self.grad
 
 	# Define main training loop
 	def train(self):
@@ -170,35 +193,18 @@ class BiCVM():
 		for count in range(self.num_iters):
 			# reset loss and gradients
 			loss = 0
-			self.grad.clear()
+			self.grad = np.zeros((len(self.idxLookup), self.wordVecSize))
+
 
 			# pass through every sentence and accumulate gradients
 			for i in range(len(self.enSents)):
-				if (i + 1) % (self.num_sent / 10) == 0:
-					percent = (i / len(self.enSents)) * 100
-					print(str(percent) + "% of the sentences processed")
 				loss += self.loss(i)
+				if i != 0 and i % (len(self.enSents) / self.batch) == 0:
+					# gradient descent
+					self.update_param()
+					self.grad = np.zeros((len(self.idxLookup), self.wordVecSize))
 
-			# account for regularization
-			loss += (self.lamb / 2) * (np.linalg.norm(self.theta)**2)
-
-			# gradient descent
-			for word in self.grad:
-				# compute gradient
-				regGrad = 2 * self.theta[self.idxLookup[word]]
-				trueGrad = self.grad[word] + regGrad
-
-				# adagrad
-				if word in self.G:
-					self.G[word] += trueGrad**2
-				else:
-					self.G[word] = trueGrad**2
-
-				adaLR = self.lr / (self.G[word] + 1e-8)**0.5
-				update = adaLR * trueGrad
-
-				# update theta
-				self.theta[self.idxLookup[word]] -= update[0]
+			self.update_param()
 
 			# print training info
 			current_time = time_since(start)
@@ -219,7 +225,6 @@ class BiCVM():
 		predictions = []
 
 		# make predictions
-		# TODO: change how out of vocab is handled and maybe how predictions are made
 		with open(val, "r") as f:
 			for line in f:
 				data = line[:-1].split("\t")
@@ -234,9 +239,10 @@ class BiCVM():
 					if word in self.idxLookup:
 						koVector += self.theta[self.idxLookup[word]]
 
-				similarity = 1 - cosine(enVector, koVector) if enVector.all() != 0 and koVector.all() != 0 else 0
+				similarity = cosine(enVector, koVector)
+				similarity = abs(similarity[0][0])
 
-				if similarity >= 0.5:
+				if similarity >= 0.8:
 					predictions.append(True)
 				else:
 					predictions.append(False)
@@ -254,15 +260,15 @@ class BiCVM():
 
 # Train and test the model
 def main():
-	# model = BiCVM(wordVecSize=40, num_sent=500000, num_iters=9,
-	# 			  neg_samples=5, m=5, lr=0.1)
+	args = parser.parse_args()
 
-	model = BiCVM(wordVecSize=40, num_sent=-1, num_iters=15,
-				  neg_samples=5, m=5, tensors='bicvm_theta',
-				  idxLookup='bicvm_lookup')
+	model = BiCVM(wordVecSize=args.vec, num_sent=args.sen, num_iters=args.itr, 
+				  neg_samples=args.neg, m=args.mar, tensors=args.ten, v=args.ver,
+				  lr=args.lrt, idxLookup=args.idx)
 
 	print("---Loading Training Data---")
 	model.load_data('train.txt.gz')
+	print(len(model.theta))
 	print(model.theta[0])
 
 	print("---Training Model---")
