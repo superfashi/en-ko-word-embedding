@@ -18,4 +18,4 @@ Our simple baseline achieved the following score.
 
 BiCVM achieved the following score when trained as described above.
 
-`Precision: 0.522, Recall: 0.565, FScore: 0.543`
+`Precision: 0.926, Recall: 0.256, FScore: 0.401`

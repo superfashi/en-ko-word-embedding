@@ -5,6 +5,7 @@ import numpy as np
 import pickle
 from sklearn.metrics.pairwise import cosine_similarity as cosine
 import time, math
+import string
 
 import argparse
 
@@ -220,6 +221,38 @@ class BiCVM():
 			with open('bicvm_lookup', 'wb') as f:
 				pickle.dump(self.idxLookup, f)
 
+	# Dump word vectors to txt file
+	def vec_to_txt(self):
+		def iseng(word):
+			printable = set(string.printable)
+			for char in word:
+				if char not in printable:
+					return False
+			return True
+
+		# get relevant english and korean dictionaries
+		print('---Splitting dictionaries---')
+		en = dict()
+		ko = dict()
+
+		for word in self.idxLookup:
+			if not iseng(word):
+				ko[word] = self.theta[self.idxLookup[word]]
+			else:
+				en[word] = self.theta[self.idxLookup[word]]
+
+		# dump to txt
+		with open('en.txt', 'w') as f:
+			for word in en:
+				f.write(word + ' ')
+				f.write(" ".join(str(v) for v in en[word]) + '\n')
+
+		with open('ko.txt', 'w') as f:
+			for word in ko:
+				f.write(word + ' ')
+				f.write(" ".join(str(v) for v in ko[word]) + '\n')
+
+
 	# Generate predictions based on validation data
 	def gen_predictions(self, val, out):
 		predictions = []
@@ -266,17 +299,22 @@ def main():
 				  neg_samples=args.neg, m=args.mar, tensors=args.ten, v=args.ver,
 				  lr=args.lrt, idxLookup=args.idx)
 
-	print("---Loading Training Data---")
-	model.load_data('train.txt.gz')
-	print(len(model.theta))
-	print(model.theta[0])
+	# print("---Loading Training Data---")
+	# model.load_data('train.txt.gz')
+	# print(len(model.theta))
+	# print(model.theta[0])
 
-	print("---Training Model---")
-	model.train()
-	print(model.theta[0])
+	# print("---Training Model---")
+	# model.train()
+	# print(model.theta[0])
 
-	print("---Writing Predictions---")
-	model.gen_predictions("val.txt", "bicvm_pred.txt")
+	# print("---Writing Predictions---")
+	# model.gen_predictions("val.txt", "bicvm_pred.txt")
+
+	print("---Dumping Word Vectors---")
+	model.vec_to_txt()
+
+
 
 
 
